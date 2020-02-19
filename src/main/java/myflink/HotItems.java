@@ -48,40 +48,35 @@ public class HotItems {
 
 	public static void main(String[] args) throws Exception {
 
-		// 创建 execution environment
+
 		StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
-		// 告诉系统按照 EventTime 处理
+		// Tell the system to handle according to EventTime
 		env.setStreamTimeCharacteristic(TimeCharacteristic.EventTime);
-		// 为了打印到控制台的结果不乱序，我们配置全局的并发为1，改变并发对结果正确性没有影响
+		// In order that the results printed to the console are not out of order, we configure the global concurrency to 1
 		env.setParallelism(1);
 
-		// UserBehavior.csv 的本地文件路径, 在 resources 目录下
 		URL fileUrl = HotItems.class.getClassLoader().getResource("UserBehavior.csv");
 		Path filePath = Path.fromLocalFile(new File(fileUrl.toURI()));
-		// 抽取 UserBehavior 的 TypeInformation，是一个 PojoTypeInfo
 		PojoTypeInfo<UserBehavior> pojoType = (PojoTypeInfo<UserBehavior>) TypeExtractor.createTypeInfo(UserBehavior.class);
-		// 由于 Java 反射抽取出的字段顺序是不确定的，需要显式指定下文件中字段的顺序
 		String[] fieldOrder = new String[]{"userId", "itemId", "categoryId", "behavior", "timestamp"};
-		// 创建 PojoCsvInputFormat
 		PojoCsvInputFormat<UserBehavior> csvInput = new PojoCsvInputFormat<>(filePath, pojoType, fieldOrder);
 
 
 		env
-			// 创建数据源，得到 UserBehavior 类型的 DataStream
+
 			.createInput(csvInput, pojoType)
-			// 抽取出时间和生成 watermark
+			// Extract time and generate watermark
 			.assignTimestampsAndWatermarks(new AscendingTimestampExtractor<UserBehavior>() {
 				@Override
 				public long extractAscendingTimestamp(UserBehavior userBehavior) {
-					// 原始数据单位秒，将其转成毫秒
+					//Raw data is in seconds and converted to milliseconds
 					return userBehavior.timestamp * 1000;
 				}
 			})
-			// 过滤出只有点击的数据
+			// Filter out only clickable data
 			.filter(new FilterFunction<UserBehavior>() {
 				@Override
 				public boolean filter(UserBehavior userBehavior) throws Exception {
-					// 过滤出只有点击的数据
 					return userBehavior.behavior.equals("pv");
 				}
 			})
@@ -95,7 +90,9 @@ public class HotItems {
 		env.execute("Hot Items Job");
 	}
 
-	/** 求某个窗口中前 N 名的热门点击商品，key 为窗口时间戳，输出为 TopN 的结果字符串 */
+	/*
+	Find the top N popular hits in a window, key is the window timestamp, and the output is TopN result string
+	*/
 	public static class TopNHotItems extends KeyedProcessFunction<Tuple, ItemViewCount, String> {
 
 		private final int topSize;
@@ -104,7 +101,8 @@ public class HotItems {
 			this.topSize = topSize;
 		}
 
-		// 用于存储商品与点击数的状态，待收齐同一个窗口的数据后，再触发 TopN 计算
+		// Used to store the status of products and clicks.
+		// After receiving the data of the same window, the TopN calculation is triggered
 		private ListState<ItemViewCount> itemState;
 
 		@Override
@@ -122,59 +120,62 @@ public class HotItems {
 			Context context,
 			Collector<String> collector) throws Exception {
 
-			// 每条数据都保存到状态中
+			//Each piece of data is saved to the state
 			itemState.add(input);
-			// 注册 windowEnd+1 的 EventTime Timer, 当触发时，说明收齐了属于windowEnd窗口的所有商品数据
+
+			// Register the EventTime Timer of windowEnd + 1, when triggered,
+			// it means that all the product data belonging to the windowEnd
+			// window are collected
 			context.timerService().registerEventTimeTimer(input.windowEnd + 1);
 		}
 
 		@Override
 		public void onTimer(
 			long timestamp, OnTimerContext ctx, Collector<String> out) throws Exception {
-			// 获取收到的所有商品点击量
+			// Get all product clicks received
 			List<ItemViewCount> allItems = new ArrayList<>();
 			for (ItemViewCount item : itemState.get()) {
 				allItems.add(item);
 			}
-			// 提前清除状态中的数据，释放空间
+			// Clear the data in the state in advance to free up space
 			itemState.clear();
-			// 按照点击量从大到小排序
+			// Sort by click
 			allItems.sort(new Comparator<ItemViewCount>() {
 				@Override
 				public int compare(ItemViewCount o1, ItemViewCount o2) {
 					return (int) (o2.viewCount - o1.viewCount);
 				}
 			});
-			// 将排名信息格式化成 String, 便于打印
+			// Format ranking information as String for easy printing
 			StringBuilder result = new StringBuilder();
 			result.append("====================================\n");
-			result.append("时间: ").append(new Timestamp(timestamp-1)).append("\n");
+			result.append("time: ").append(new Timestamp(timestamp-1)).append("\n");
                         for (int i=0; i<allItems.size() && i < topSize; i++) {
 				ItemViewCount currentItem = allItems.get(i);
-				// No1:  商品ID=12224  浏览量=2413
+				// No1: Product ID = 12224 Views = 2413
 				result.append("No").append(i).append(":")
-					.append("  商品ID=").append(currentItem.itemId)
-					.append("  浏览量=").append(currentItem.viewCount)
+					.append("  itemID=").append(currentItem.itemId)
+					.append("  views=").append(currentItem.viewCount)
 					.append("\n");
 			}
 			result.append("====================================\n\n");
 
-			// 控制输出频率，模拟实时滚动结果
+			// Control output frequency and simulate real-time rolling results
 			Thread.sleep(1000);
 
 			out.collect(result.toString());
 		}
 	}
 
-	/** 用于输出窗口的结果 */
+	/** Results for output window */
 	public static class WindowResultFunction implements WindowFunction<Long, ItemViewCount, Tuple, TimeWindow> {
 
 		@Override
 		public void apply(
-			Tuple key,  // 窗口的主键，即 itemId
-			TimeWindow window,  // 窗口
-			Iterable<Long> aggregateResult, // 聚合函数的结果，即 count 值
-			Collector<ItemViewCount> collector  // 输出类型为 ItemViewCount
+			Tuple key,  // The primary key of the window, which is itemId
+			TimeWindow window,
+			Iterable<Long> aggregateResult, // The result of the aggregate function, which is the count value
+			Collector<ItemViewCount> collector  // Output type is ItemViewCount
 		) throws Exception {
 			Long itemId = ((Tuple1<Long>) key).f0;
 			Long count = aggregateResult.iterator().next();
@@ -182,7 +183,7 @@ public class HotItems {
 		}
 	}
 
-	/** COUNT 统计的聚合函数实现，每出现一条记录加一 */
+	/** COUNT statistics aggregation function is implemented, each occurrence of a record plus */
 	public static class CountAgg implements AggregateFunction<UserBehavior, Long, Long> {
 
 		@Override
@@ -206,11 +207,13 @@ public class HotItems {
 		}
 	}
 
-	/** 商品点击量(窗口操作的输出类型) */
+	/**
+	 Product clicks (output type of window operation)
+	 */
 	public static class ItemViewCount {
-		public long itemId;     // 商品ID
-		public long windowEnd;  // 窗口结束时间戳
-		public long viewCount;  // 商品的点击量
+		public long itemId;     //
+		public long windowEnd;  // Window end timestamp
+		public long viewCount;  // Product traffic
 
 		public static ItemViewCount of(long itemId, long windowEnd, long viewCount) {
 			ItemViewCount result = new ItemViewCount();
@@ -221,12 +224,12 @@ public class HotItems {
 		}
 	}
 
-	/** 用户行为数据结构 **/
+	/** User Behavior Data Structure **/
 	public static class UserBehavior {
-		public long userId;         // 用户ID
-		public long itemId;         // 商品ID
-		public int categoryId;      // 商品类目ID
-		public String behavior;     // 用户行为, 包括("pv", "buy", "cart", "fav")
-		public long timestamp;      // 行为发生的时间戳，单位秒
+		public long userId;
+		public long itemId;
+		public int categoryId;      // Product category ID
+		public String behavior;     // User behavior, including ("pv", "buy", "cart", "fav")
+		public long timestamp;      // Timestamp when the action occurred, in seconds
 	}
 }
